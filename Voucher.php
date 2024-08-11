@@ -37,7 +37,7 @@ class Voucher
                     }
                 }
                 $code = 'GC'.$customer['id'] . 'C' . $code;
-                if (ORM::for_table('tbl_voucher')->where('code', $code)->find_one()) {
+                if (ORM::for_table('tbl_voucher')->whereRaw("BINARY `code` = '$code'")->find_one()) {
                     // if exist, generate another code
                     goto repeat;
                 }
@@ -59,11 +59,14 @@ class Voucher
                         "Internet Plan: $p[name_plan]\n" .
                         "\nYou can use this or share it with your friends.\n\nBest Regards");
                     $v->save();
-                    $idInbox = $v->id();
                 } else {
                     r2(U . 'order', 'e', "Voucher Failed to create, Please call admin");
                 }
+            }else{
+                r2(U . 'order', 'e', "Plan not found");
             }
+        }else{
+            r2(U . 'order', 'e', "Plan not found");
         }
     }
 
