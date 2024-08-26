@@ -24,6 +24,11 @@ class Voucher
         global $config;
         if (!empty($plan['plan_expired'])) {
             $p = ORM::for_table('tbl_plans')->where('id', $plan['plan_expired'])->find_one();
+			if ($p['is_radius'] == '1') {
+						$router_name = 'radius';
+					} else {
+						$router_name = $plan['routers'];
+						}
             if ($p) {
                 repeat:
                 if ($config['voucher_format'] == 'numbers') {
@@ -43,7 +48,7 @@ class Voucher
                 }
                 $d = ORM::for_table('tbl_voucher')->create();
                 $d->type = $p['type'];
-                $d->routers = $p['routers'];
+                $d->routers = $router_name;
                 $d->id_plan = $p['id'];
                 $d->code = $code;
                 $d->user = '0';
