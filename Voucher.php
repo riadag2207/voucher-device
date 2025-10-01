@@ -7,8 +7,8 @@ class Voucher
     function description()
     {
         return [
-            'title' => 'Voucher Direct Use',
-            'description' => 'This Device will Create Voucher with auto-register user. Customer can use voucher code directly to connect to hotspot without manual registration, similar to Mikhmon voucher system',
+            'title' => 'Voucher Hotspot Direct',
+            'description' => 'Create Hotspot Voucher directly to Mikrotik without user registration. Works like Mikhmon voucher system - just generate and use immediately',
             'author' => 'ibnu maksum',
             'url' => [
                 'Github' => 'https://github.com/hotspotbilling/phpnuxbill/',
@@ -18,251 +18,232 @@ class Voucher
         ];
     }
 
-    // Add Customer to Mikrotik/Device - Modified dengan auto-register user
+    // Add Customer to Mikrotik/Device - Langsung ke Mikrotik tanpa register
     function add_customer($customer, $plan)
     {
         global $config;
         if (!empty($plan['plan_expired'])) {
             $p = ORM::for_table('tbl_plans')->where('id', $plan['plan_expired'])->find_one();
+            
+            if (!$p) {
+                r2(U . 'order', 'e', "Plan not found");
+                return false;
+            }
+            
             if ($p['is_radius'] == '1') {
                 $router_name = 'radius';
             } else {
                 $router_name = $plan['routers'];
             }
-            if ($p) {
-                repeat:
-                if ($config['voucher_format'] == 'numbers') {
-                    $code = generateUniqueNumericVouchers(1, 10)[0];
-                } else {
-                    $code = strtoupper(substr(md5(time() . rand(10000, 99999)), 0, 10));
-                    if ($config['voucher_format'] == 'low') {
-                        $code = strtolower($code);
-                    } else if ($config['voucher_format'] == 'rand') {
-                        $code = Lang::randomUpLowCase($code);
-                    }
-                }
-                $code = 'VC' . $code;
-                if (ORM::for_table('tbl_voucher')->whereRaw("BINARY `code` = '$code'")->find_one()) {
-                    goto repeat;
-                }
-                
-                // STEP 1: Auto-create dummy customer untuk voucher ini
-                $dummy_customer = $this->createDummyCustomer($code);
-                
-                if (!$dummy_customer) {
-                    if (isset($customer['id'])) {
-                        r2(U . 'order', 'e', "Failed to create voucher user");
-                    }
-                    return false;
-                }
-                
-                // STEP 2: Aktivasi plan untuk user dummy ini
-                $activated = $this->activateUserPlan($dummy_customer['id'], $p, $router_name);
-                
-                if (!$activated) {
-                    // Hapus dummy customer jika aktivasi gagal
-                    ORM::for_table('tbl_customers')->where('id', $dummy_customer['id'])->delete_many();
-                    if (isset($customer['id'])) {
-                        r2(U . 'order', 'e', "Failed to activate voucher plan");
-                    }
-                    return false;
-                }
-                
-                // STEP 3: Simpan voucher code untuk tracking
-                $d = ORM::for_table('tbl_voucher')->create();
-                $d->type = $p['type'];
-                $d->routers = $router_name;
-                $d->id_plan = $p['id'];
-                $d->code = $code;
-                $d->user = $code; // username sama dengan code
-                $d->status = '1'; // 1 = sudah dipakai (karena sudah di-assign)
-                $d->generated_by = isset($customer['id']) ? $customer['id'] : 'admin';
-                $d->generated_date = date('Y-m-d H:i:s');
-                $d->save();
-                
-                // Notifikasi ke customer asli (jika ada)
-                if (isset($customer['id']) && $customer['id'] > 0) {
-                    $v = ORM::for_table('tbl_customers_inbox')->create();
-                    $v->from = "System";
-                    $v->customer_id = $customer['id'];
-                    $v->subject = Lang::T('New Voucher for '.$p['name_plan'].' Created');
-                    $v->date_created = date('Y-m-d H:i:s');
-                    $v->body = nl2br("Dear $customer[fullname],\n\nYour Internet Voucher Code is : <span style=\"user-select: all; cursor: pointer; background-color: #000\">$code</span>\n" .
-                        "Internet Plan: $p[name_plan]\n" .
-                        "Validity: $p[validity] $p[validity_unit]\n" .
-                        "\nVoucher ini bisa langsung digunakan untuk login hotspot.\n" .
-                        "Username: $code\n" .
-                        "Password: $code\n\n" .
-                        "Best Regards");
-                    $v->save();
-                }
-                
-                return $code;
+            
+            // Generate voucher code
+            repeat:
+            if ($config['voucher_format'] == 'numbers') {
+                $code = generateUniqueNumericVouchers(1, 10)[0];
             } else {
-                if (isset($customer['id'])) {
-                    r2(U . 'order', 'e', "Plan not found");
+                $code = strtoupper(substr(md5(time() . rand(10000, 99999)), 0, 10));
+                if ($config['voucher_format'] == 'low') {
+                    $code = strtolower($code);
+                } else if ($config['voucher_format'] == 'rand') {
+                    $code = Lang::randomUpLowCase($code);
                 }
-                return false;
             }
+            $code = 'VC' . $code;
+            
+            // Cek duplikasi
+            if (ORM::for_table('tbl_voucher')->whereRaw("BINARY `code` = '$code'")->find_one()) {
+                goto repeat;
+            }
+            
+            // LANGSUNG TAMBAHKAN KE MIKROTIK
+            if ($router_name != 'radius') {
+                $result = $this->addToMikrotik($code, $p, $router_name);
+                if (!$result['success']) {
+                    r2(U . 'order', 'e', $result['message']);
+                    return false;
+                }
+            }
+            
+            // Simpan record voucher untuk tracking saja
+            $d = ORM::for_table('tbl_voucher')->create();
+            $d->type = $p['type'];
+            $d->routers = $router_name;
+            $d->id_plan = $p['id'];
+            $d->code = $code;
+            $d->user = $code;
+            $d->status = '0'; // 0 = ready to use
+            $d->generated_by = isset($customer['id']) ? $customer['id'] : 'admin';
+            $d->generated_date = date('Y-m-d H:i:s');
+            $d->save();
+            
+            // Kirim notifikasi jika ada customer
+            if (isset($customer['id']) && $customer['id'] > 0) {
+                $v = ORM::for_table('tbl_customers_inbox')->create();
+                $v->from = "System";
+                $v->customer_id = $customer['id'];
+                $v->subject = 'Voucher ' . $p['name_plan'] . ' Ready';
+                $v->date_created = date('Y-m-d H:i:s');
+                $v->body = nl2br("Dear $customer[fullname],\n\n" .
+                    "Your Hotspot Voucher:\n\n" .
+                    "Code: <b style='background:#000;color:#fff;padding:5px'>$code</b>\n" .
+                    "Plan: $p[name_plan]\n" .
+                    "Duration: $p[validity] $p[validity_unit]\n\n" .
+                    "How to use:\n" .
+                    "1. Connect to WiFi Hotspot\n" .
+                    "2. Open browser (will redirect to login)\n" .
+                    "3. Enter voucher code as Username and Password\n\n" .
+                    "Best Regards");
+                $v->save();
+            }
+            
+            return $code;
         } else {
-            if (isset($customer['id'])) {
-                r2(U . 'order', 'e', "Plan not found");
+            r2(U . 'order', 'e', "Plan expired not set");
+            return false;
+        }
+    }
+
+    // Fungsi utama: Tambah user langsung ke Mikrotik
+    private function addToMikrotik($username, $plan, $router_name)
+    {
+        try {
+            $mikrotik = ORM::for_table('tbl_routers')->where('name', $router_name)->find_one();
+            
+            if (!$mikrotik) {
+                return ['success' => false, 'message' => 'Router not found'];
             }
-            return false;
-        }
-    }
-
-    // Fungsi untuk membuat dummy customer otomatis
-    private function createDummyCustomer($username)
-    {
-        // Cek apakah username sudah ada
-        $existing = ORM::for_table('tbl_customers')->where('username', $username)->find_one();
-        if ($existing) {
-            return false; // Username sudah ada
-        }
-        
-        $c = ORM::for_table('tbl_customers')->create();
-        $c->username = $username;
-        $c->password = $username; // Password sama dengan username
-        $c->fullname = 'Voucher-' . $username;
-        $c->email = $username . '@voucher.local';
-        $c->phonenumber = '0000000000';
-        $c->address = 'Auto Generated';
-        $c->service_type = 'Voucher';
-        $c->account_type = 'Personal';
-        $c->created_date = date('Y-m-d H:i:s');
-        
-        if ($c->save()) {
-            return [
-                'id' => $c->id(),
-                'username' => $username,
-                'password' => $username
-            ];
-        }
-        
-        return false;
-    }
-
-    // Fungsi untuk aktivasi plan ke user
-    private function activateUserPlan($customer_id, $plan, $router_name)
-    {
-        global $config;
-        
-        $customer = ORM::for_table('tbl_customers')->find_one($customer_id);
-        if (!$customer) {
-            return false;
-        }
-        
-        // Hitung waktu expired
-        $now = new DateTime();
-        switch ($plan['validity_unit']) {
-            case 'Hrs':
-                $expired = $now->add(new DateInterval('PT' . $plan['validity'] . 'H'));
-                break;
-            case 'Days':
-                $expired = $now->add(new DateInterval('P' . $plan['validity'] . 'D'));
-                break;
-            case 'Months':
-                $expired = $now->add(new DateInterval('P' . $plan['validity'] . 'M'));
-                break;
-            default:
-                $expired = $now->add(new DateInterval('P1D'));
-        }
-        
-        // Simpan user recharge
-        $r = ORM::for_table('tbl_user_recharges')->create();
-        $r->customer_id = $customer_id;
-        $r->username = $customer['username'];
-        $r->plan_id = $plan['id'];
-        $r->namebp = $plan['name_plan'];
-        $r->recharged_on = date('Y-m-d H:i:s');
-        $r->recharged_time = date('Y-m-d H:i:s');
-        $r->expiration = $expired->format('Y-m-d H:i:s');
-        $r->time = $expired->format('Y-m-d H:i:s');
-        $r->status = 'on';
-        $r->method = 'Voucher';
-        $r->routers = $router_name;
-        $r->type = $plan['type'];
-        $r->save();
-        
-        // Update customer dengan plan aktif
-        $customer->service_type = $plan['type'];
-        $customer->username = $customer['username'];
-        $customer->password = $customer['password'];
-        $customer->pppoe_username = $customer['username'];
-        $customer->pppoe_password = $customer['password'];
-        $customer->save();
-        
-        // Tambahkan ke router menggunakan Package yang sesuai
-        if ($router_name != 'radius') {
-            try {
-                $mikrotik = Mikrotik::info($router_name);
-                if ($mikrotik) {
-                    // Gunakan fungsi bawaan PHPNuxBill untuk add customer
-                    if ($plan['type'] == 'Hotspot') {
-                        Package::rechargeUser($customer_id, $router_name, $plan['id'], 'Voucher');
-                    } else if ($plan['type'] == 'PPPOE') {
-                        Package::rechargeUser($customer_id, $router_name, $plan['id'], 'Voucher');
-                    }
+            
+            // Koneksi ke Mikrotik
+            $client = $this->connectMikrotik($mikrotik['ip_address'], $mikrotik['username'], 
+                                             Password::_decrypt($mikrotik['password']));
+            
+            if (!$client) {
+                return ['success' => false, 'message' => 'Cannot connect to Mikrotik'];
+            }
+            
+            $password = $username; // Password sama dengan username
+            
+            if ($plan['type'] == 'Hotspot') {
+                // Hitung limit uptime dalam format Mikrotik
+                $limitUptime = $this->calculateUptime($plan['validity'], $plan['validity_unit']);
+                
+                // Tambah user ke Hotspot
+                $client->write('/ip/hotspot/user/add', false);
+                $client->write('=name=' . $username, false);
+                $client->write('=password=' . $password, false);
+                $client->write('=profile=' . $plan['name_plan'], false);
+                $client->write('=limit-uptime=' . $limitUptime, false);
+                $client->write('=comment=Voucher-Generated-' . date('Y-m-d'), true);
+                $response = $client->read();
+                
+                // Cek apakah berhasil
+                if (isset($response['!trap'])) {
+                    return ['success' => false, 'message' => 'Failed to add to Mikrotik: ' . $response['!trap'][0]['message']];
                 }
-            } catch (Exception $e) {
-                // Log error tapi tetap return true karena database sudah tersimpan
-                error_log("Voucher Plugin - Router Error: " . $e->getMessage());
+                
+            } else if ($plan['type'] == 'PPPOE') {
+                // Tambah user ke PPPoE Secret
+                $client->write('/ppp/secret/add', false);
+                $client->write('=name=' . $username, false);
+                $client->write('=password=' . $password, false);
+                $client->write('=profile=' . $plan['name_plan'], false);
+                $client->write('=service=pppoe', false);
+                $client->write('=comment=Voucher-Generated-' . date('Y-m-d'), true);
+                $response = $client->read();
+                
+                if (isset($response['!trap'])) {
+                    return ['success' => false, 'message' => 'Failed to add to Mikrotik: ' . $response['!trap'][0]['message']];
+                }
             }
+            
+            return ['success' => true, 'message' => 'User added to Mikrotik successfully'];
+            
+        } catch (Exception $e) {
+            return ['success' => false, 'message' => 'Error: ' . $e->getMessage()];
         }
-        
-        return true;
     }
 
-    // Remove Customer to Mikrotik/Device
+    // Koneksi ke Mikrotik menggunakan RouterOS API
+    private function connectMikrotik($ip, $user, $pass)
+    {
+        try {
+            $client = new RouterosAPI();
+            $client->debug = false;
+            
+            if ($client->connect($ip, $user, $pass)) {
+                return $client;
+            }
+            return false;
+        } catch (Exception $e) {
+            return false;
+        }
+    }
+
+    // Hitung uptime limit untuk Mikrotik
+    private function calculateUptime($validity, $unit)
+    {
+        switch ($unit) {
+            case 'Hrs':
+                return $validity . 'h';
+            case 'Days':
+                return ($validity * 24) . 'h';
+            case 'Months':
+                return ($validity * 30 * 24) . 'h';
+            default:
+                return '24h';
+        }
+    }
+
+    // Remove Customer dari Mikrotik
     function remove_customer($customer, $plan)
     {
-        // Expired voucher akan di-handle otomatis oleh cron job PHPNuxBill
+        if (!empty($plan['routers']) && $plan['routers'] != 'radius') {
+            $this->removeFromMikrotik($customer['username'], $plan['type'], $plan['routers']);
+        }
     }
 
-    // customer change username
-    public function change_username($from, $to)
+    // Hapus user dari Mikrotik
+    private function removeFromMikrotik($username, $type, $router_name)
     {
-        // Untuk voucher sekali pakai, username tidak perlu diubah
+        try {
+            $mikrotik = ORM::for_table('tbl_routers')->where('name', $router_name)->find_one();
+            if (!$mikrotik) return false;
+            
+            $client = $this->connectMikrotik($mikrotik['ip_address'], $mikrotik['username'], 
+                                             Password::_decrypt($mikrotik['password']));
+            if (!$client) return false;
+            
+            if ($type == 'Hotspot') {
+                // Cari user di hotspot
+                $client->write('/ip/hotspot/user/print', false);
+                $client->write('?name=' . $username, true);
+                $users = $client->read();
+                
+                if (isset($users[0]['.id'])) {
+                    $client->write('/ip/hotspot/user/remove', false);
+                    $client->write('=.id=' . $users[0]['.id'], true);
+                    $client->read();
+                }
+            } else if ($type == 'PPPOE') {
+                // Cari secret di pppoe
+                $client->write('/ppp/secret/print', false);
+                $client->write('?name=' . $username, true);
+                $secrets = $client->read();
+                
+                if (isset($secrets[0]['.id'])) {
+                    $client->write('/ppp/secret/remove', false);
+                    $client->write('=.id=' . $secrets[0]['.id'], true);
+                    $client->read();
+                }
+            }
+            
+            return true;
+        } catch (Exception $e) {
+            return false;
+        }
     }
 
-    // Add Plan to Mikrotik/Device
-    function add_plan($plan)
-    {
-        // Plan sudah ada di database
-    }
-
-    // Update Plan to Mikrotik/Device
-    function update_plan($old_name, $plan)
-    {
-        // Plan sudah ada di database
-    }
-
-    // Remove Plan from Mikrotik/Device
-    function remove_plan($plan)
-    {
-        // Plan sudah ada di database
-    }
-
-    // check if customer is online
-    function online_customer($customer, $router_name)
-    {
-        return false;
-    }
-
-    // make customer online
-    function connect_customer($customer, $ip, $mac_address, $router_name)
-    {
-        // Di-handle oleh hotspot
-    }
-
-    // make customer disconnect
-    function disconnect_customer($customer, $router_name)
-    {
-        // Di-handle oleh hotspot
-    }
-
-    // Function untuk generate multiple vouchers sekaligus
+    // Fungsi untuk generate banyak voucher sekaligus
     function generate_bulk_vouchers($plan_id, $quantity, $router_name = '')
     {
         global $config;
@@ -273,8 +254,10 @@ class Voucher
         }
 
         if ($p['is_radius'] == '1') {
-            $router_name = 'radius';
-        } else if (empty($router_name)) {
+            return ['success' => false, 'message' => 'RADIUS not supported yet'];
+        }
+        
+        if (empty($router_name)) {
             $router_name = $p['routers'];
         }
 
@@ -299,50 +282,34 @@ class Voucher
                 goto repeat;
             }
             
-            if (ORM::for_table('tbl_customers')->where('username', $code)->find_one()) {
-                goto repeat;
-            }
-
-            // Create dummy customer
-            $dummy_customer = $this->createDummyCustomer($code);
+            // Tambahkan langsung ke Mikrotik
+            $result = $this->addToMikrotik($code, $p, $router_name);
             
-            if (!$dummy_customer) {
+            if (!$result['success']) {
                 $failed++;
                 continue;
             }
             
-            // Activate plan
-            $activated = $this->activateUserPlan($dummy_customer['id'], $p, $router_name);
-            
-            if (!$activated) {
-                ORM::for_table('tbl_customers')->where('id', $dummy_customer['id'])->delete_many();
-                $failed++;
-                continue;
-            }
-            
-            // Save voucher record
+            // Simpan record
             $d = ORM::for_table('tbl_voucher')->create();
             $d->type = $p['type'];
             $d->routers = $router_name;
             $d->id_plan = $p['id'];
             $d->code = $code;
             $d->user = $code;
-            $d->status = '1';
+            $d->status = '0';
             $d->generated_by = 'admin';
             $d->generated_date = date('Y-m-d H:i:s');
+            $d->save();
             
-            if ($d->save()) {
-                $vouchers[] = [
-                    'code' => $code,
-                    'username' => $code,
-                    'password' => $code,
-                    'plan' => $p['name_plan'],
-                    'validity' => $p['validity'] . ' ' . $p['validity_unit']
-                ];
-            }
+            $vouchers[] = [
+                'code' => $code,
+                'plan' => $p['name_plan'],
+                'duration' => $p['validity'] . ' ' . $p['validity_unit'],
+                'type' => $p['type']
+            ];
             
-            // Delay untuk menghindari konflik
-            usleep(200000); // 0.2 detik
+            usleep(100000); // 0.1 detik delay
         }
 
         return [
@@ -353,4 +320,13 @@ class Voucher
             'total' => $quantity
         ];
     }
+
+    // Fungsi-fungsi lain (tidak digunakan untuk voucher direct)
+    public function change_username($from, $to) { }
+    function add_plan($plan) { }
+    function update_plan($old_name, $plan) { }
+    function remove_plan($plan) { }
+    function online_customer($customer, $router_name) { return false; }
+    function connect_customer($customer, $ip, $mac_address, $router_name) { }
+    function disconnect_customer($customer, $router_name) { }
 }
