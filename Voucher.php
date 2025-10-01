@@ -47,6 +47,12 @@ class Voucher
                     // if exist, generate another code
                     goto repeat;
                 }
+                
+                // Tambahkan user ke Mikrotik/Router untuk Hotspot
+                if ($router_name != 'radius') {
+                    $this->createHotspotUser($code, $code, $p, $router_name);
+                }
+                
                 $d = ORM::for_table('tbl_voucher')->create();
                 $d->type = $p['type'];
                 $d->routers = $router_name;
@@ -93,11 +99,97 @@ class Voucher
         }
     }
 
+    // Fungsi untuk membuat user hotspot di Mikrotik
+    private function createHotspotUser($username, $password, $plan, $router_name)
+    {
+        $mikrotik = Mikrotik::info($router_name);
+        if (!$mikrotik) {
+            return false;
+        }
+
+        $client = Mikrotik::getClient($mikrotik['ip_address'], $mikrotik['username'], $mikrotik['password']);
+        
+        if ($plan['type'] == 'Hotspot') {
+            // Tambahkan user ke Hotspot User Profile
+            $client->write('/ip/hotspot/user/add', false);
+            $client->write('=name=' . $username, false);
+            $client->write('=password=' . $password, false);
+            $client->write('=profile=' . $plan['name_plan'], false);
+            $client->write('=limit-uptime=' . $this->formatTime($plan['validity'], $plan['validity_unit']), false);
+            $client->write('=comment=Voucher-' . date('Y-m-d'), true);
+            $client->read();
+        } else if ($plan['type'] == 'PPPOE') {
+            // Tambahkan user ke PPPoE Secret
+            $client->write('/ppp/secret/add', false);
+            $client->write('=name=' . $username, false);
+            $client->write('=password=' . $password, false);
+            $client->write('=profile=' . $plan['name_plan'], false);
+            $client->write('=comment=Voucher-' . date('Y-m-d'), true);
+            $client->read();
+        }
+        
+        return true;
+    }
+
+    // Format waktu untuk Mikrotik
+    private function formatTime($validity, $unit)
+    {
+        switch ($unit) {
+            case 'Hrs':
+                return $validity . 'h';
+            case 'Days':
+                return ($validity * 24) . 'h';
+            case 'Months':
+                return ($validity * 30 * 24) . 'h';
+            default:
+                return $validity . 'h';
+        }
+    }
+
     // Remove Customer to Mikrotik/Device
     function remove_customer($customer, $plan)
     {
-        // Ketika voucher digunakan dan expired, bisa di-handle di sini
-        // Untuk voucher sekali pakai, biasanya otomatis ter-handle oleh sistem
+        // Ketika voucher digunakan dan expired, hapus dari router
+        if (!empty($plan['routers']) && $plan['routers'] != 'radius') {
+            $this->removeHotspotUser($customer['username'], $plan, $plan['routers']);
+        }
+    }
+
+    // Fungsi untuk menghapus user dari Mikrotik
+    private function removeHotspotUser($username, $plan, $router_name)
+    {
+        $mikrotik = Mikrotik::info($router_name);
+        if (!$mikrotik) {
+            return false;
+        }
+
+        $client = Mikrotik::getClient($mikrotik['ip_address'], $mikrotik['username'], $mikrotik['password']);
+        
+        if ($plan['type'] == 'Hotspot') {
+            // Cari ID user
+            $client->write('/ip/hotspot/user/print', false);
+            $client->write('?name=' . $username, true);
+            $users = $client->read();
+            
+            if (isset($users[0]['.id'])) {
+                $client->write('/ip/hotspot/user/remove', false);
+                $client->write('=.id=' . $users[0]['.id'], true);
+                $client->read();
+            }
+        } else if ($plan['type'] == 'PPPOE') {
+            // Cari ID secret
+            $client->write('/ppp/secret/print', false);
+            $client->write('?name=' . $username, true);
+            $secrets = $client->read();
+            
+            if (isset($secrets[0]['.id'])) {
+                $client->write('/ppp/secret/remove', false);
+                $client->write('=.id=' . $secrets[0]['.id'], true);
+                $client->read();
+            }
+        }
+        
+        return true;
     }
 
     // customer change username
@@ -178,6 +270,11 @@ class Voucher
                 goto repeat;
             }
 
+            // Tambahkan user ke Mikrotik/Router untuk Hotspot
+            if ($router_name != 'radius') {
+                $this->createHotspotUser($code, $code, $p, $router_name);
+            }
+
             $d = ORM::for_table('tbl_voucher')->create();
             $d->type = $p['type'];
             $d->routers = $router_name;
@@ -191,6 +288,9 @@ class Voucher
             if ($d->save()) {
                 $vouchers[] = $code;
             }
+            
+            // Delay sedikit untuk avoid konflik
+            usleep(100000); // 0.1 detik
         }
 
         return ['success' => true, 'vouchers' => $vouchers, 'count' => count($vouchers)];
